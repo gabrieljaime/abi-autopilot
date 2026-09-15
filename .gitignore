@@ -1,0 +1,25 @@
+# Local configuration, credentials and generated runtime data
+config.local.json
+config.local.json*.bak
+runtime/
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Editors and operating systems
+.claude/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
