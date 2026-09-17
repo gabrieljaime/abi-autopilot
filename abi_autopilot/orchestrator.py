@@ -13,6 +13,8 @@ from .gitops import (
     create_or_reuse_worktree, changed_files, ensure_no_protected, status_porcelain,
     commit_all, push_issue_branch, fast_forward_remote_base, ensure_baseline_worktree,
     delete_issue_branch_if_merged,
+    branch_divergence, branch_release_status, commit_is_released,
+    find_issue_commits_on_branch, fetch as git_fetch, ref_exists, slugify,
 )
 from .shell import CommandError
 from .state import RunStateStore
@@ -29,6 +31,7 @@ class Orchestrator:
         self.repo_slug = cfg["repo_slug"]
         self.repo_path = cfg["repo_path"]
         self.base_branch = cfg["base_branch"]
+        self.deployment_branch = cfg.get("deployment_branch") or cfg["base_branch"]
         runtime = Path(cfg.get("runtime_dir", "runtime"))
         if not runtime.is_absolute():
             runtime = base_dir / runtime
@@ -97,7 +100,174 @@ class Orchestrator:
             print(f"{'#':>5}  {'RISK':<6} TITLE")
             for i in sorted(done, key=lambda x: x.number):
                 print(f"{i.number:>5}  {i.risk:<6} {i.title}")
+
+        self.print_release_section()
         return rows
+
+    # ── Release / promoción ─────────────────────────────────────────────────
+
+    def _deployment_separate(self) -> bool:
+        return self.deployment_branch != self.base_branch
+
+    def issue_release_state(self, issue) -> dict:
+        """Estado de entrega de una issue, con la evidencia que lo respalda.
+
+        Comparar SHAs no alcanza. Se combinan tres señales, de más fuerte a más
+        débil:
+
+        ``ancestor``          el commit es alcanzable desde la rama de despliegue.
+        ``patch-equivalent``  el parche ya existe upstream aunque el SHA difiera
+                              (cherry-pick o rebase limpios), según `git cherry`.
+        ``message-match``     la rama de despliegue tiene commits con el prefijo
+                              de Autopilot de esa issue, pero el parche no es
+                              idéntico. Es lo que pasa cuando la promoción
+                              resolvió conflictos: el trabajo está, el contenido
+                              no es byte a byte el mismo.
+
+        Se distingue `message-match` en lugar de mezclarlo con los otros dos
+        porque es la única de las tres que conviene revisar a ojo.
+        """
+        deployment_ref = f"origin/{self.deployment_branch}"
+        branch = f"origin/agent/issue-{issue.number}-{slugify(issue.title)}"
+        released = None
+        pending: list[str] = []
+        evidence = None
+
+        if ref_exists(self.repo_path, f"refs/remotes/{branch}"):
+            status = branch_release_status(self.repo_path, branch, deployment_ref)
+            released = status["released"]
+            pending = status["pending"]
+            if released:
+                evidence = "patch-equivalent"
+        else:
+            # La rama de la issue puede haberse borrado tras integrar. El
+            # trabajo sigue siendo identificable por sus commits en la rama de
+            # integración: así se detectó el caso de #71.
+            commits = find_issue_commits_on_branch(
+                self.repo_path, f"origin/{self.base_branch}", issue.number
+            )
+            if commits:
+                pending = [c for c in commits if not commit_is_released(self.repo_path, c, deployment_ref)]
+                released = not pending
+                if released:
+                    evidence = "patch-equivalent"
+
+        # Última señal: la promoción puede haber resuelto conflictos, y entonces
+        # el patch-id ya no coincide aunque el trabajo sí esté entregado.
+        if released is False or released is None:
+            promoted = find_issue_commits_on_branch(
+                self.repo_path, deployment_ref, issue.number
+            )
+            if promoted:
+                released = True
+                evidence = "message-match"
+                pending = []
+
+        return {
+            "issue": issue.number,
+            "title": issue.title,
+            "labels": issue.labels,
+            "state": issue.state,
+            "branch_known": released is not None,
+            "released": released,
+            "evidence": evidence,
+            "pending_commits": pending,
+        }
+
+    def release_overview(self, limit: int = 100) -> dict:
+        """Conteos por etapa + divergencia entre integración y despliegue."""
+        git_fetch(self.repo_path)
+        integrated = [x for x in ghx._list_with_label(self.repo_slug, ghx.INTEGRATED_LABEL, limit) if not x.is_epic]
+        done = [x for x in ghx.list_done(self.repo_slug, limit) if not x.is_epic]
+        rows = [self.issue_release_state(i) for i in sorted(integrated + done, key=lambda x: x.number)]
+        drift = (0, 0)
+        if self._deployment_separate():
+            drift = branch_divergence(
+                self.repo_path,
+                f"origin/{self.deployment_branch}",
+                f"origin/{self.base_branch}",
+            )
+        return {
+            "integration_branch": self.base_branch,
+            "deployment_branch": self.deployment_branch,
+            "separate": self._deployment_separate(),
+            "drift_deployment_only": drift[0],
+            "drift_integration_only": drift[1],
+            "rows": rows,
+        }
+
+    def print_release_section(self) -> dict:
+        overview = self.release_overview()
+        print()
+        if not overview["separate"]:
+            print(
+                f"RELEASE · integración y despliegue son la misma rama ({self.base_branch}); "
+                "integrar equivale a entregar."
+            )
+            return overview
+
+        rows = overview["rows"]
+        released = [r for r in rows if r["released"] is True]
+        pending = [r for r in rows if r["released"] is False]
+        unknown = [r for r in rows if r["released"] is None]
+        print(
+            f"RELEASE · integración `{overview['integration_branch']}` "
+            f"→ despliegue `{overview['deployment_branch']}`"
+        )
+        print(f"  RELEASED           {len(released)}")
+        print(f"  PENDING PROMOTION  {len(pending)}")
+        if unknown:
+            print(f"  SIN RAMA CONOCIDA  {len(unknown)}")
+        if pending:
+            print()
+            print(f"  {'#':>5}  {'STATE':<20} {'RELEASED':<9} TITLE")
+            for r in pending:
+                state = next((x for x in r["labels"] if x.startswith("agent:")), "-")
+                print(f"  {r['issue']:>5}  {state:<20} {'NO':<9} {r['title'][:60]}")
+
+        left = overview["drift_deployment_only"]
+        right = overview["drift_integration_only"]
+        threshold = int(self.cfg.get("release", {}).get("drift_warn_commits", 1))
+        if left and right and (left + right) >= threshold:
+            print()
+            print("RELEASE DRIFT")
+            print(f"  {overview['deployment_branch']} unique commits: {left}")
+            print(f"  {overview['integration_branch']} unique commits: {right}")
+            print()
+            print("  WARNING: integración y rama de despliegue divergieron.")
+            print("  No cerrar nuevas issues como released hasta reconciliar.")
+        return overview
+
+    def consistency_check(self, limit: int = 200) -> list[dict]:
+        """Issues CLOSED cuyo trabajo no llegó a la rama de despliegue.
+
+        Es el chequeo que faltaba: una issue cerrada con su código sólo en la
+        rama de integración es una mentira de estado, y así #71, #95 y #97
+        figuraron terminadas durante semanas sin estar en `main`.
+        """
+        if not self._deployment_separate():
+            return []
+        git_fetch(self.repo_path)
+        p = ghx._gh(
+            self.repo_slug,
+            [
+                "issue", "list", "--state", "closed", "--limit", str(limit),
+                "--json", "number,title,body,state,url,labels",
+            ],
+        )
+        arr = json.loads(p.stdout or "[]")
+        errors = []
+        for x in arr:
+            issue = ghx.Issue(
+                x["number"], x["title"], x.get("body") or "", x["state"], x["url"],
+                [l["name"] for l in x.get("labels", [])],
+            )
+            if issue.is_epic:
+                continue
+            info = self.issue_release_state(issue)
+            if info["branch_known"] and info["released"] is False:
+                errors.append(info)
+        return errors
 
     def auto_ready_scan(self) -> list[dict]:
         """Auto-triage open issues that have no agent:* label yet.
@@ -433,9 +603,16 @@ class Orchestrator:
                     self._save_stage(number, stage=stage, provider=provider, base_sha=base_sha, branch=branch, worktree=str(wt), fix_count=fix_count, review_count=review_count, feedback=feedback, fast_summary=fast_summary)
                     continue
                 if stage == "targeted":
+                    # `summary` here includes the targeted Playwright/pytest
+                    # evidence (e.g. `targeted-auto-playwright.log`). Without
+                    # keeping it, the "fast" stage below overwrites
+                    # `fast_summary` and the reviewer never sees it, even
+                    # though the issue's acceptance criteria explicitly
+                    # require full E2E evidence.
+                    fast_summary = summary
                     stage = "fast"
                 elif stage == "fast":
-                    fast_summary = summary
+                    fast_summary = fast_summary + "\n" + summary if fast_summary else summary
                     stage = "review"
                 else:
                     stage = "finalize"
@@ -491,12 +668,23 @@ class Orchestrator:
                     push_issue_branch(wt, branch)
 
                 integrated = False
+                integrate_note = None
                 if integ.get("auto_integrate") and issue.risk in set(integ.get("allowed_risks", [])):
                     try:
                         fast_forward_remote_base(wt, commit_sha, self.base_branch, base_sha)
                         integrated = True
                     except Exception as e:
-                        return self._block(ghx.get_issue(self.repo_slug, number), run_dir, f"Implementación verde y rama publicada, pero no se integró: {e}")
+                        # A failed fast-forward here (base drift, or the issue
+                        # branch needed a real merge commit and so isn't a
+                        # direct single-parent descendant of base_sha) is not
+                        # a validation failure — the implementation is green
+                        # and published. Blocking finalize on it stranded the
+                        # issue below `agent:done`, where `autopilot.py
+                        # integrate` (which requires that label) could never
+                        # reach it. Fall through like a risk level that skips
+                        # auto-integrate: mark done, let `integrate` finish
+                        # the merge in its own temp worktree instead.
+                        integrate_note = str(e)
 
                 issue = ghx.get_issue(self.repo_slug, number)
                 ghx.set_state(self.repo_slug, issue, "agent:done")

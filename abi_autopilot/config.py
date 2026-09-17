@@ -6,12 +6,22 @@ class ConfigError(RuntimeError):
     pass
 
 
-def default_config(repo_path: Path, repo_slug: str, base_branch: str) -> dict:
+def default_config(
+    repo_path: Path,
+    repo_slug: str,
+    base_branch: str,
+    deployment_branch: str | None = None,
+) -> dict:
     worktree_root = repo_path.parent / f"{repo_path.name}-autopilot-worktrees"
     return {
         "repo_path": str(repo_path),
         "repo_slug": repo_slug,
+        # Rama donde Autopilot integra el trabajo de cada issue.
         "base_branch": base_branch,
+        # Rama canónica de despliegue. Una issue sólo está *entregada* cuando su
+        # trabajo es alcanzable desde acá. Si coincide con `base_branch`, el
+        # ciclo es el de siempre: integrar y cerrar en un paso.
+        "deployment_branch": deployment_branch or base_branch,
         "worktree_root": str(worktree_root),
         "runtime_dir": "runtime",
         "autopilot": {
@@ -131,6 +141,20 @@ def default_config(repo_path: Path, repo_slug: str, base_branch: str) -> dict:
             ],
             "sync_clean_local_base_after_push": True,
         },
+        "release": {
+            # Cuando integración y despliegue son ramas distintas, cerrar una
+            # issue al integrar miente: el trabajo no está en la rama que se
+            # despliega. Con esto en True, `integrate` deja la issue en
+            # `agent:integrated` y el cierre espera a la promoción.
+            "require_deployment_branch": True,
+            # Etiqueta intermedia: implementado e integrado, sin promover.
+            "integrated_label": "agent:integrated",
+            # Aviso cuando ambas ramas acumulan trabajo exclusivo. Es la señal
+            # temprana del incidente de UX: semanas de divergencia silenciosa.
+            "drift_warn_commits": 1,
+            # Con True, la divergencia bloquea nuevos cierres como released.
+            "block_close_on_drift": False,
+        },
         "protected_paths": [".env", "backend/data/"],
         "workspace_bootstrap": [
             {
@@ -197,6 +221,11 @@ def load_config(path: Path) -> dict:
     missing = [k for k in required if not data.get(k)]
     if missing:
         raise ConfigError(f"Faltan claves en config: {', '.join(missing)}")
+    # Compatibilidad: una config previa a la separación integración/despliegue
+    # no tiene `deployment_branch`. Asumir `base_branch` reproduce exactamente
+    # el comportamiento anterior (integrar == entregar).
+    if not data.get("deployment_branch"):
+        data["deployment_branch"] = data["base_branch"]
     data["repo_path"] = str(Path(data["repo_path"]).expanduser().resolve())
     data["worktree_root"] = str(Path(data["worktree_root"]).expanduser().resolve())
     dep_root = data.get("dependency_cache", {}).get("root")
@@ -205,16 +234,27 @@ def load_config(path: Path) -> dict:
     return data
 
 
-def write_initial_config(dest: Path, repo: str, repo_slug: str, base_branch: str) -> dict:
+def write_initial_config(
+    dest: Path,
+    repo: str,
+    repo_slug: str,
+    base_branch: str,
+    deployment_branch: str | None = None,
+) -> dict:
     repo_path = Path(repo).expanduser().resolve()
-    cfg = default_config(repo_path, repo_slug, base_branch)
+    cfg = default_config(repo_path, repo_slug, base_branch, deployment_branch)
     dest.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     return cfg
 
 
 def upgrade_config(path: Path) -> dict:
     current = load_config(path)
-    defaults = default_config(Path(current["repo_path"]), current["repo_slug"], current["base_branch"])
+    defaults = default_config(
+        Path(current["repo_path"]),
+        current["repo_slug"],
+        current["base_branch"],
+        current.get("deployment_branch"),
+    )
     merged = _deep_merge(defaults, current)
 
     # v1 used npx directly. Replace only the exact old defaults; preserve custom commands.
@@ -270,6 +310,12 @@ def upgrade_config(path: Path) -> dict:
 
     # v1.7: batch-aware integration and bounded worker settings are merged from
     # defaults. Existing operator values always win through _deep_merge.
+    # v1.8: separar integración de despliegue. Sin valor previo se asume
+    # `base_branch`, que es el comportamiento histórico.
+    if not merged.get("deployment_branch"):
+        merged["deployment_branch"] = merged["base_branch"]
+    merged.setdefault("release", defaults["release"])
+
     merged.setdefault("batch_validation", {})
     merged.setdefault("validation_workers", {})
     merged.setdefault("validation", {}).setdefault("batch_fast", defaults["validation"]["batch_fast"])

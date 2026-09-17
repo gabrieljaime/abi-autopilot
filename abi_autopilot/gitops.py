@@ -97,7 +97,13 @@ def commit_all(worktree: str | Path, message: str) -> str:
     git(worktree,["add","-A"])
     # diff --cached --check catches whitespace errors
     git(worktree,["diff","--cached","--check"])
-    git(worktree,["commit","-m",message])
+    # The caller already confirmed there are source changes vs base_sha, but
+    # those changes may have been committed manually (outside this run)
+    # before finalize ran. `git commit` errors on an empty staged diff, so
+    # treat "already committed" as success instead of blocking the issue.
+    staged = git(worktree,["diff","--cached","--quiet"], check=False)
+    if staged.returncode != 0:
+        git(worktree,["commit","-m",message])
     return git(worktree,["rev-parse","HEAD"]).stdout.strip()
 
 
@@ -316,3 +322,103 @@ def push_head_to_base_if_unchanged(worktree: str | Path, base_branch: str, expec
     if verify != head:
         raise CommandError(f"Push no verificó el SHA esperado: HEAD={head[:12]} remote={verify[:12]}")
     return head
+
+
+# ── Release gate ────────────────────────────────────────────────────────────
+# "Integrado" y "entregado" no son lo mismo. Cuando la rama de integración y la
+# de despliegue son distintas, un merge exitoso a integración no pone el trabajo
+# en producción. Estos helpers responden la única pregunta que importa antes de
+# cerrar una issue: ¿este trabajo es alcanzable desde la rama de despliegue?
+
+
+def is_ancestor(repo: str | Path, commit: str, ref: str) -> bool:
+    """True si `commit` es alcanzable desde `ref` por historia directa."""
+    p = git(repo, ["merge-base", "--is-ancestor", commit, ref], check=False)
+    return p.returncode == 0
+
+
+def cherry_status(repo: str | Path, upstream: str, head: str, limit: str | None = None) -> list[tuple[str, str]]:
+    """`git cherry` como lista de (signo, sha).
+
+    El signo es lo que importa:
+      ``-`` el parche ya existe upstream (aunque el SHA difiera: cherry-pick,
+            rebase, squash con el mismo contenido).
+      ``+`` el trabajo todavía no está upstream.
+    """
+    args = ["cherry", upstream, head]
+    if limit:
+        args.append(limit)
+    p = git(repo, args, check=False)
+    if p.returncode != 0:
+        return []
+    rows: list[tuple[str, str]] = []
+    for line in (p.stdout or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0] in ("+", "-"):
+            rows.append((parts[0], parts[1]))
+    return rows
+
+
+def commit_is_released(repo: str | Path, commit: str, deployment_ref: str) -> bool:
+    """¿El trabajo de `commit` está en la rama de despliegue?
+
+    Comparar SHAs no alcanza: la promoción puede haber sido por cherry-pick,
+    rebase o squash, y entonces el SHA cambia aunque el contenido sea el mismo.
+    Por eso se combinan dos señales: ancestro directo, o parche equivalente
+    upstream según `git cherry`.
+    """
+    if is_ancestor(repo, commit, deployment_ref):
+        return True
+    rows = cherry_status(repo, deployment_ref, commit, f"{commit}^")
+    return bool(rows) and all(sign == "-" for sign, _ in rows)
+
+
+def branch_release_status(repo: str | Path, branch_ref: str, deployment_ref: str) -> dict:
+    """Estado de promoción de una rama de issue completa.
+
+    `pending` son los commits con `+`: trabajo propio que todavía no llegó a la
+    rama de despliegue. Mientras haya uno, la issue no está entregada.
+    """
+    rows = cherry_status(repo, deployment_ref, branch_ref)
+    pending = [sha for sign, sha in rows if sign == "+"]
+    equivalent = [sha for sign, sha in rows if sign == "-"]
+    return {
+        "branch": branch_ref,
+        "deployment": deployment_ref,
+        "pending": pending,
+        "equivalent": equivalent,
+        "released": not pending,
+    }
+
+
+def branch_divergence(repo: str | Path, left_ref: str, right_ref: str) -> tuple[int, int]:
+    """(commits exclusivos de left, commits exclusivos de right)."""
+    p = git(repo, ["rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], check=False)
+    if p.returncode != 0:
+        return (0, 0)
+    parts = (p.stdout or "").split()
+    if len(parts) != 2:
+        return (0, 0)
+    return (int(parts[0]), int(parts[1]))
+
+
+def find_issue_commits_on_branch(repo: str | Path, branch_ref: str, issue_number: int, limit: int = 50) -> list[str]:
+    """Commits de Autopilot para una issue en `branch_ref`, del más viejo al más nuevo.
+
+    Es el respaldo cuando la rama `agent/issue-N-*` ya fue borrada de origin:
+    el trabajo sigue identificable por el prefijo de commit que escribe
+    Autopilot. Se usa el prefijo exacto, no el número suelto, para no levantar
+    menciones en documentación o mensajes de otros commits.
+    """
+    p = git(
+        repo,
+        [
+            "log", branch_ref, "--fixed-strings",
+            "--grep", f"fix(issue-{issue_number}):",
+            "--format=%H", "-n", str(limit),
+        ],
+        check=False,
+    )
+    if p.returncode != 0:
+        return []
+    return list(reversed([x.strip() for x in (p.stdout or "").splitlines() if x.strip()]))

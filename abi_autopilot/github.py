@@ -6,8 +6,14 @@ from .shell import run_capture, CommandError
 
 AGENT_STATE_LABELS = [
     "agent:ready","agent:running","agent:review","agent:fix",
-    "agent:waiting-quota","agent:blocked","agent:done"
+    "agent:waiting-quota","agent:blocked","agent:integrated","agent:done"
 ]
+
+# `agent:integrated` = implementado y mergeado en la rama de integración, pero
+# todavía no alcanzable desde la rama de despliegue. `agent:done` conserva su
+# nombre pero cambia de significado: ahora es *entregado*, y sólo se aplica
+# cuando el trabajo está en la rama canónica.
+INTEGRATED_LABEL = "agent:integrated"
 RISK_LABELS = ["risk:low","risk:medium","risk:high"]
 SPECIAL_LABELS = ["needs:human","needs:product"]
 
@@ -203,7 +209,8 @@ def ensure_labels(repo: str):
         "agent:fix":("fbca04","Corrección automática"),
         "agent:waiting-quota":("bf8700","Esperando reset de cuota del proveedor"),
         "agent:blocked":("b60205","Bloqueada por Autopilot"),
-        "agent:done":("0e8a16","Autopilot completó"),
+        "agent:integrated":("c5def5","Integrado en la rama de integración; pendiente de promoción"),
+        "agent:done":("0e8a16","Entregado en la rama de despliegue"),
         "risk:low":("2da44e","Bajo riesgo"),
         "risk:medium":("d4c5f9","Riesgo medio"),
         "risk:high":("b60205","Alto riesgo"),

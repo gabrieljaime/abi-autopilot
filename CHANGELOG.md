@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.8.0
+
+- `deployment_branch` separa la rama de integración de la rama que se despliega.
+  Sin valor explícito se asume `base_branch`, así que un proyecto de una sola
+  rama no cambia de comportamiento.
+- Nuevo estado `agent:integrated`: mergeado en la rama de integración pero
+  todavía no entregado. `agent:done` conserva el nombre y pasa a significar
+  *entregado en la rama de despliegue*.
+- `integrate`/`integrate-done` ya no cierran una issue por haber integrado: si
+  la rama de despliegue es otra, la dejan `agent:integrated` y abierta.
+- Gate de promoción por equivalencia de parche (`git cherry`) además de
+  ancestría, para reconocer cherry-picks y rebases.
+- `release-audit`: auditoría de consistencia (issues CLOSED fuera de la rama de
+  despliegue), aviso de divergencia entre ramas y `--promote` para cerrar lo ya
+  entregado.
+- `release-status --issue N`: estado de entrega de una issue con su evidencia.
+- `observe` informa RELEASED / PENDING PROMOTION y la divergencia.
+
 ## v1.7.0
 
 - Integración batch en un único worktree, con validaciones baratas por issue y un gate final acumulado antes del push.

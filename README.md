@@ -181,6 +181,62 @@ Todos los comandos se ejecutan como `python autopilot.py <comando>`. Esta tabla 
 | `cleanup` | Elimina el worktree de una issue terminada. | Sólo lo elimina si está limpio; conserva la rama local para trazabilidad. |
 | `integrate` | Verifica e integra una issue `agent:done` en la rama base. | Ejecuta validaciones, puede hacer push y puede cerrar la issue. Los conflictos se preservan. |
 | `integrate-done` | Ordena y planifica la integración de varias issues terminadas. | Sin `--execute` sólo muestra el plan; con `--execute` valida, integra, publica y opcionalmente cierra. |
+| `release-audit` | Verifica que las issues cerradas estén realmente en la rama de despliegue y muestra la divergencia integración↔despliegue. | Sólo lee, salvo con `--promote`, que cierra como entregadas las issues ya promovidas. |
+| `release-status` | Estado de entrega de una issue puntual, con la evidencia que lo respalda. | Sólo lectura. |
+
+### Integración y despliegue no son lo mismo
+
+Autopilot distingue dos ramas:
+
+```yaml
+base_branch:       integration/phase5-refactors   # donde se integra cada issue
+deployment_branch: main                           # la que realmente se despliega
+```
+
+Si se omite `deployment_branch`, se asume `base_branch` y el flujo es el de
+siempre: integrar y cerrar en un paso.
+
+Cuando son distintas, el ciclo de vida tiene tres etapas y `agent:done` pasa a
+significar **entregado**, no “mergeado en algún lado”:
+
+```text
+implementado   agent:ready → agent:running → agent:review
+integrado      agent:integrated   merge en la rama de integración; la issue queda ABIERTA
+entregado      agent:done         alcanzable desde la rama de despliegue; recién acá se cierra
+```
+
+La promoción se confirma con tres señales, de más fuerte a más débil, porque
+comparar SHAs no alcanza —un cherry-pick o un rebase cambian el SHA sin cambiar
+el trabajo:
+
+| Evidencia | Significado |
+|---|---|
+| `ancestor` | El commit es alcanzable desde la rama de despliegue. |
+| `patch-equivalent` | `git cherry` lo marca `-`: el parche ya existe upstream con otro SHA. |
+| `message-match` | La rama de despliegue tiene commits con el prefijo de la issue, pero el parche difiere. Pasa cuando la promoción resolvió conflictos; conviene revisar el diff. |
+
+Una issue no se cierra mientras `git cherry` deje trabajo propio en `+`.
+
+#### Política de release
+
+```text
+implementación → integración → validación → lote de promoción → rama de despliegue → cierre
+```
+
+La rama de integración no debe divergir indefinidamente. `release-audit` avisa
+en cuanto ambas ramas acumulan trabajo exclusivo:
+
+```text
+RELEASE DRIFT
+  main unique commits: 30
+  integration/phase5-refactors unique commits: 30
+
+  WARNING: integración y rama de despliegue divergieron.
+  No cerrar nuevas issues como released hasta reconciliar.
+```
+
+Con `release.block_close_on_drift: true` la divergencia además bloquea
+`--promote`. El umbral del aviso se ajusta con `release.drift_warn_commits`.
 
 ### Configuración inicial
 

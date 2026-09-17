@@ -11,6 +11,9 @@ from . import github as ghx
 from . import __version__
 from .bootstrap import prepare_workspace, _safe_remove_generated_dir
 from .gitops import (
+    branch_divergence,
+    branch_release_status,
+    commit_is_released,
     git,
     fetch,
     remote_branch_sha,
@@ -27,6 +30,8 @@ from .gitops import (
     status_porcelain,
     ensure_baseline_worktree,
     delete_issue_branch_if_merged,
+    ref_exists,
+    slugify,
 )
 from .shell import CommandError
 from .validator import (
@@ -70,6 +75,9 @@ class IntegrationManager:
         self.repo = Path(cfg["repo_path"])
         self.repo_slug = cfg["repo_slug"]
         self.base_branch = cfg["base_branch"]
+        # Rama canónica de despliegue. Si difiere de `base_branch`, integrar no
+        # es entregar y el cierre de la issue espera a la promoción.
+        self.deployment_branch = cfg.get("deployment_branch") or cfg["base_branch"]
         self.worktree_root = Path(cfg["worktree_root"])
         runtime = Path(cfg.get("runtime_dir", "runtime"))
         if not runtime.is_absolute():
@@ -354,14 +362,70 @@ class IntegrationManager:
             return live_issue.state.upper() == "CLOSED"
         if live_issue.is_epic:
             raise CommandError("Refusing automatic epic closure from integration path.")
+
+        # Gate de release. Integrar en la rama de integración no entrega nada si
+        # la rama de despliegue es otra: eso fue exactamente lo que dejó a #71,
+        # #95 y #97 cerradas con su código fuera de `main`. La issue queda
+        # `agent:integrated` y espera la promoción.
+        if not self._deployment_is_integration():
+            released = self._issue_is_released(issue, integration_commit)
+            if not released:
+                ghx.set_state(self.repo_slug, live_issue, ghx.INTEGRATED_LABEL)
+                if self.cfg.get("integration", {}).get("comment_updates", True):
+                    ghx.comment(
+                        self.repo_slug,
+                        issue.number,
+                        f"Integrada en `{self.base_branch}`, **pendiente de promoción** a "
+                        f"`{self.deployment_branch}`.\n\n"
+                        "La issue queda abierta a propósito: el trabajo todavía no es "
+                        f"alcanzable desde la rama de despliegue. Se cierra cuando "
+                        f"`{self.deployment_branch}` lo contenga "
+                        "(`python autopilot.py release-audit --promote`).",
+                    )
+                return False
+
         if live_issue.state.upper() == "OPEN":
             if "agent:done" not in live_issue.labels:
-                raise CommandError("La issue perdió agent:done antes del cierre; se deja abierta.")
+                ghx.set_state(self.repo_slug, live_issue, "agent:done")
             ghx.close_issue(self.repo_slug, issue.number)
         verify = ghx.get_issue(self.repo_slug, issue.number)
         if verify.state.upper() != "CLOSED":
             raise CommandError("GitHub no confirmó el cierre de la issue.")
         return True
+
+    # ── Release gate ────────────────────────────────────────────────────────
+
+    def _deployment_is_integration(self) -> bool:
+        """True cuando no hay promoción separada (config de una sola rama)."""
+        if not self.cfg.get("release", {}).get("require_deployment_branch", True):
+            return True
+        return self.deployment_branch == self.base_branch
+
+    def _deployment_ref(self) -> str:
+        return f"origin/{self.deployment_branch}"
+
+    def _issue_is_released(self, issue, integration_commit: str | None = None) -> bool:
+        """¿El trabajo de la issue está en la rama de despliegue?
+
+        Se consulta por rama de issue (que detecta cherry-picks vía
+        `git cherry`) y, como respaldo, por el commit de integración.
+        """
+        ref = self._deployment_ref()
+        branch = f"agent/issue-{issue.number}-{slugify(issue.title)}"
+        remote_branch = f"origin/{branch}"
+        if ref_exists(self.repo, f"refs/remotes/{remote_branch}"):
+            status = branch_release_status(self.repo, remote_branch, ref)
+            if status["released"]:
+                return True
+        if integration_commit:
+            return commit_is_released(self.repo, integration_commit, ref)
+        return False
+
+    def release_drift(self) -> tuple[int, int]:
+        """(commits exclusivos de despliegue, commits exclusivos de integración)."""
+        if self._deployment_is_integration():
+            return (0, 0)
+        return branch_divergence(self.repo, self._deployment_ref(), f"origin/{self.base_branch}")
 
     def _validate_existing_or_adopted_commit(
         self,

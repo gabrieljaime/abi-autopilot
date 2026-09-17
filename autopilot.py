@@ -35,9 +35,14 @@ def cmd_version(args):
 def cmd_init(args):
     if CONFIG_PATH.exists() and not args.force:
         raise SystemExit(f"{CONFIG_PATH} ya existe. Usá --force sólo si querés reemplazarlo.")
-    cfg = write_initial_config(CONFIG_PATH, args.repo, args.repo_slug, args.base_branch)
+    cfg = write_initial_config(
+        CONFIG_PATH, args.repo, args.repo_slug, args.base_branch, args.deployment_branch
+    )
     (BASE_DIR / "runtime").mkdir(exist_ok=True)
     print(f"Config creada: {CONFIG_PATH}")
+    print(f"Integración: {cfg['base_branch']} · Despliegue: {cfg['deployment_branch']}")
+    if cfg["base_branch"] != cfg["deployment_branch"]:
+        print("Las issues se cerrarán sólo cuando el trabajo llegue a la rama de despliegue.")
     print(f"Worktrees: {cfg['worktree_root']}")
     print("Siguiente: python autopilot.py doctor")
 
@@ -45,6 +50,7 @@ def cmd_init(args):
 def cmd_upgrade_config(args):
     cfg = upgrade_config(CONFIG_PATH)
     print(f"Config actualizada a v{__version__}: {CONFIG_PATH}")
+    print(f"Integración: {cfg['base_branch']} · Despliegue: {cfg.get('deployment_branch')}")
     print(f"Backup previo: {CONFIG_PATH}.pre-v{__version__}.bak")
     print(f"Bootstrap frontend: {cfg.get('workspace_bootstrap',[{}])[0].get('strategy','legacy')} · {cfg.get('workspace_bootstrap',[{}])[0].get('command','-')}")
     print(f"Dependency cache: {cfg.get('dependency_cache',{}).get('root','-')}")
@@ -262,6 +268,92 @@ def cmd_integrate_done(args):
         raise SystemExit(4)
 
 
+def cmd_release_audit(args):
+    """Verifica que lo cerrado esté realmente en la rama de despliegue."""
+    orch = get_orch()
+    overview = orch.print_release_section()
+
+    if not overview["separate"]:
+        print("\nSin rama de despliegue separada: no hay promoción pendiente por definición.")
+        return
+
+    errors = orch.consistency_check()
+    print()
+    if errors:
+        print(f"CONSISTENCY ERROR · {len(errors)} issue(s) CLOSED fuera de la rama de despliegue")
+        for row in errors:
+            print(
+                f"  #{row['issue']} CLOSED but not present in deployment branch "
+                f"{overview['deployment_branch']} ({len(row['pending_commits'])} commit(s) sin promover)"
+            )
+    else:
+        print("CONSISTENCY OK · ninguna issue cerrada quedó fuera de la rama de despliegue.")
+
+    if args.promote:
+        cfg = load_config(CONFIG_PATH)
+        drift_blocks = (
+            cfg.get("release", {}).get("block_close_on_drift", False)
+            and overview["drift_deployment_only"]
+            and overview["drift_integration_only"]
+        )
+        if drift_blocks:
+            print("\nPromoción bloqueada: las ramas divergieron y block_close_on_drift está activo.")
+            raise SystemExit(5)
+        promoted = []
+        for row in overview["rows"]:
+            if row["released"] is not True:
+                continue
+            if str(row["state"]).upper() == "CLOSED":
+                continue
+            issue = ghx.get_issue(cfg["repo_slug"], row["issue"])
+            if issue.is_epic:
+                continue
+            ghx.set_state(cfg["repo_slug"], issue, "agent:done")
+            ghx.close_issue(
+                cfg["repo_slug"],
+                issue.number,
+                f"Promovida a `{overview['deployment_branch']}`: el trabajo es alcanzable "
+                "desde la rama de despliegue. Cerrada como entregada.",
+            )
+            promoted.append(issue.number)
+        print()
+        if promoted:
+            print("PROMOVIDAS: " + ", ".join(f"#{n}" for n in promoted))
+        else:
+            print("No hay issues integradas listas para promover.")
+
+    if errors:
+        raise SystemExit(6)
+
+
+def cmd_release_status(args):
+    """Estado de entrega de una issue puntual."""
+    cfg = load_config(CONFIG_PATH)
+    orch = get_orch()
+    issue = ghx.get_issue(cfg["repo_slug"], args.issue)
+    info = orch.issue_release_state(issue)
+    state = next((x for x in issue.labels if x.startswith("agent:")), "-")
+    if info["released"] is None:
+        released = "UNKNOWN (no encontré la rama de la issue en origin)"
+    else:
+        released = "YES" if info["released"] else "NO"
+    print(f"#{issue.number} {issue.title}")
+    print(f"  GitHub state       {issue.state}")
+    print(f"  Agent state        {state}")
+    print(f"  Integration branch {orch.base_branch}")
+    print(f"  Deployment branch  {orch.deployment_branch}")
+    print(f"  RELEASED           {released}")
+    if info.get("evidence"):
+        print(f"  Evidencia          {info['evidence']}")
+        if info["evidence"] == "message-match":
+            print("                     (promovida con conflictos resueltos: el parche no es")
+            print("                      idéntico, conviene revisar el diff a ojo)")
+    if info["pending_commits"]:
+        print(f"  Commits sin promover ({len(info['pending_commits'])}):")
+        for sha in info["pending_commits"][:20]:
+            print(f"    + {sha}")
+
+
 def build_parser():
     p = argparse.ArgumentParser(description=f"ABI Autopilot v{__version__}")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -270,6 +362,12 @@ def build_parser():
     s.add_argument("--repo", required=True, help="Ruta al repositorio que Autopilot administrará")
     s.add_argument("--repo-slug", required=True, help="Repositorio GitHub en formato owner/repository")
     s.add_argument("--base-branch", required=True, help="Rama remota que recibirá las integraciones")
+    s.add_argument(
+        "--deployment-branch",
+        default=None,
+        help="Rama canónica de despliegue. Una issue se cierra sólo cuando su trabajo "
+             "es alcanzable desde acá. Por defecto, la misma que --base-branch.",
+    )
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_init)
     s = sp.add_parser("upgrade-config"); s.set_defaults(func=cmd_upgrade_config)
@@ -294,6 +392,23 @@ def build_parser():
     s.add_argument("--execute", action="store_true", help="Sin este flag sólo muestra el plan")
     s.add_argument("--no-close", action="store_true")
     s.set_defaults(func=cmd_integrate_done)
+
+    s = sp.add_parser(
+        "release-audit",
+        help="Verifica que las issues cerradas estén realmente en la rama de despliegue "
+             "y muestra la divergencia integración↔despliegue",
+    )
+    s.add_argument(
+        "--promote",
+        action="store_true",
+        help="Cierra como entregadas las issues agent:integrated cuyo trabajo ya está "
+             "en la rama de despliegue",
+    )
+    s.set_defaults(func=cmd_release_audit)
+
+    s = sp.add_parser("release-status", help="Estado de entrega de una issue puntual")
+    s.add_argument("--issue", type=int, required=True)
+    s.set_defaults(func=cmd_release_status)
     return p
 
 
