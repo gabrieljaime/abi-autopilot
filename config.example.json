@@ -1,0 +1,259 @@
+{
+  "repo_path": "C:\\path\\to\\your-repository",
+  "repo_slug": "owner/repository",
+  "base_branch": "main",
+  "deployment_branch": "main",
+  "worktree_root": "C:\\path\\to\\your-repository-autopilot-worktrees",
+  "runtime_dir": "runtime",
+  "autopilot": {
+    "poll_seconds": 120,
+    "max_parallel": 1,
+    "max_fix_loops": 3,
+    "max_review_loops": 2,
+    "skip_epics": true,
+    "auto_ready": false,
+    "auto_ready_default_risk": "medium",
+    "implementer": "codex",
+    "implementer_fallback": null
+  },
+  "dependency_ref_prefixes": [],
+  "availability": {
+    "enabled": true,
+    "quota_fallback_wait_seconds": 900,
+    "quota_reset_grace_seconds": 120,
+    "max_wait_hours": 24,
+    "transient_backoff_seconds": [
+      60,
+      120,
+      300,
+      600,
+      900
+    ]
+  },
+  "dependency_cache": {
+    "enabled": true,
+    "root": "C:\\path\\to\\your-repository-autopilot-deps",
+    "min_free_gb": 8,
+    "lock_timeout_seconds": 1800,
+    "stale_lock_seconds": 7200,
+    "cleanup_done_artifacts": true,
+    "done_artifacts": [
+      "frontend/.next",
+      "frontend/node_modules",
+      "frontend/playwright-report",
+      "frontend/test-results",
+      ".coverage",
+      "backend/.coverage",
+      "coverage.xml",
+      "backend/coverage.xml"
+    ]
+  },
+  "process_env": {
+    "PLAYWRIGHT_HTML_OPEN": "never"
+  },
+  "toolchain": {
+    "expected_python_major_minor": "",
+    "expected_node_major": null,
+    "strict": false
+  },
+  "baseline": {
+    "enabled": true,
+    "required": false,
+    "compare_phases": [
+      "targeted",
+      "fast"
+    ],
+    "mode": "no_new_failures"
+  },
+  "codex": {
+    "command": "codex",
+    "sandbox": "workspace-write",
+    "model": null,
+    "fix_model": null,
+    "extra_args": [
+      "--ephemeral"
+    ]
+  },
+  "claude": {
+    "command": "claude",
+    "model": "sonnet",
+    "implement_model": null,
+    "implement_max_turns": 8,
+    "implement_permission_mode": "acceptEdits",
+    "max_turns": 8,
+    "resume_turns": 4,
+    "max_turn_resumes": 2,
+    "max_diff_chars": 60000,
+    "permission_mode": "plan"
+  },
+  "batch_validation": {
+    "enabled": true,
+    "full_suite_once_at_end": true,
+    "close_only_after_final_gate": true,
+    "force_full_for_high_risk": true
+  },
+  "validation_workers": {
+    "vitest": 4,
+    "pytest": 1,
+    "playwright": 1
+  },
+  "integration": {
+    "auto_integrate": false,
+    "auto_close": false,
+    "allowed_risks": [
+      "low"
+    ],
+    "push_issue_branch": true,
+    "comment_updates": true,
+    "manual_close_after_success": true,
+    "validate_targeted": true,
+    "validate_fast": true,
+    "code_paths": [],
+    "full_for_risks": [
+      "medium",
+      "high"
+    ],
+    "full_if_frontend_changed": true,
+    "cleanup_generated": true,
+    "generated_artifacts": [
+      ".coverage",
+      "backend/.coverage",
+      "coverage.xml",
+      "backend/coverage.xml",
+      "frontend/.next",
+      "frontend/playwright-report",
+      "frontend/test-results"
+    ],
+    "sync_clean_local_base_after_push": true
+  },
+  "release": {
+    "require_deployment_branch": true,
+    "integrated_label": "agent:integrated",
+    "drift_warn_commits": 1,
+    "block_close_on_drift": false,
+    "audit_limit": 1000
+  },
+  "protected_paths": [
+    ".env",
+    "backend/data/"
+  ],
+  "workspace_bootstrap": [
+    {
+      "name": "frontend-npm-ci",
+      "cwd": "frontend",
+      "strategy": "npm_shared_cache",
+      "command": "npm ci --no-audit --no-fund",
+      "manifest": "package.json",
+      "lockfile": "package-lock.json",
+      "key_files": [
+        "package-lock.json",
+        "package.json"
+      ],
+      "cache_probe": "node_modules/.package-lock.json",
+      "link_path": "node_modules",
+      "if_missing": "node_modules/.package-lock.json",
+      "rerun_if_changed": [
+        "frontend/package.json",
+        "frontend/package-lock.json"
+      ],
+      "timeout": 2400
+    }
+  ],
+  "validation": {
+    "non_llm_retries": 1,
+    "targeted_backend_no_cov": true,
+    "targeted": [],
+    "fast": [
+      {
+        "name": "frontend-vitest",
+        "cwd": "frontend",
+        "command": "npm test",
+        "when": "frontend_changed",
+        "timeout": 1800
+      },
+      {
+        "name": "frontend-tsc",
+        "cwd": "frontend",
+        "command": "npm run typecheck -- --incremental false",
+        "when": "frontend_changed",
+        "timeout": 1200
+      },
+      {
+        "name": "frontend-lint",
+        "cwd": "frontend",
+        "command": "npm run lint",
+        "when": "frontend_changed",
+        "timeout": 1200
+      },
+      {
+        "name": "backend-pytest",
+        "cwd": "backend",
+        "command": "python -m pytest -q",
+        "when": "backend_changed",
+        "timeout": 3600
+      }
+    ],
+    "full": [
+      {
+        "name": "frontend-build",
+        "cwd": "frontend",
+        "command": "npm run build",
+        "when": "frontend_changed",
+        "timeout": 1800
+      },
+      {
+        "name": "frontend-e2e",
+        "cwd": "frontend",
+        "command": "npm run test:e2e",
+        "when": "frontend_changed",
+        "timeout": 7200
+      }
+    ],
+    "batch_fast": [
+      {
+        "name": "frontend-tsc",
+        "cwd": "frontend",
+        "command": "npm run typecheck -- --incremental false",
+        "when": "frontend_changed",
+        "timeout": 1200
+      },
+      {
+        "name": "frontend-lint",
+        "cwd": "frontend",
+        "command": "npm run lint",
+        "when": "frontend_changed",
+        "timeout": 1200
+      }
+    ],
+    "batch_full": [
+      {
+        "name": "backend-pytest",
+        "cwd": "backend",
+        "command": "python -m pytest -q",
+        "when": "backend_changed",
+        "timeout": 3600
+      },
+      {
+        "name": "frontend-vitest",
+        "cwd": "frontend",
+        "command": "npm test",
+        "when": "frontend_changed",
+        "timeout": 1800
+      },
+      {
+        "name": "frontend-build",
+        "cwd": "frontend",
+        "command": "npm run build",
+        "when": "frontend_changed",
+        "timeout": 1800
+      },
+      {
+        "name": "frontend-e2e",
+        "cwd": "frontend",
+        "command": "npm run test:e2e",
+        "when": "frontend_changed",
+        "timeout": 7200
+      }
+    ]
+  }
+}

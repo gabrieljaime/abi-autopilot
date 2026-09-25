@@ -1,0 +1,76 @@
+# GitHub issue form for issues that ABI Autopilot will implement.
+#
+# Copy this file into the repository Autopilot works on, as:
+#   .github/ISSUE_TEMPLATE/autopilot.yml
+# GitHub then offers "Autopilot task" under "New issue". Each field becomes a
+# "### <label>" section in the issue body, which is what the agents read and
+# what Autopilot parses for dependencies.
+name: Autopilot task
+description: A small, well-defined change for ABI Autopilot to implement.
+title: "<short imperative summary, e.g. Add CSV export to the orders page>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you write:** the AI agents read only the **title and this body** — comments are ignored, so edit the body to clarify.
+        The body is sent to the AI provider: **never include secrets, credentials or personal data.**
+        Keep it to one small change (about one pull request). Set the risk with a label after creating the issue: `abi-autopilot mark-ready <N> --risk low|medium|high`.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this is done, in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant files, folders, functions, screens or endpoints. Current vs. expected behavior. Links to designs or docs.
+      placeholder: |
+        Orders page: frontend/src/pages/orders/OrdersTable.tsx
+        Data comes from GET /api/orders (backend/app/routes/orders.py).
+        Today there is no export; users copy rows by hand.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is included.
+      placeholder: "- Export button above the table\n- CSV with the currently filtered rows"
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What must NOT be changed or added. This keeps the agent from over-reaching.
+      placeholder: "- Excel/PDF formats\n- Changes to the orders API"
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Concrete, checkable behavior. The reviewer rejects the change if any criterion is not met.
+      placeholder: |
+        - [ ] The button downloads orders.csv with the visible columns, in the same order
+        - [ ] Active filters apply to the export
+        - [ ] A unit test covers the CSV generation
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Issues that must be closed first, one per line as #N. Add "optional" after a reference that should not block.
+      placeholder: "#123\n#124 optional"
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: What should be checked and which tests should cover it. Shell commands live in the Autopilot config, not here.

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abi-autopilot"
+dynamic = ["version"]
+description = "Turn GitHub issues into reviewed, tested commits with AI coding agents (Codex CLI / Claude Code)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gabriel Jaime", email = "gabrielsjaime@gmail.com" }]
+keywords = ["github", "issues", "ai", "agents", "codex", "claude", "automation", "ci"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/gabrieljaime/abi-autopilot"
+Issues = "https://github.com/gabrieljaime/abi-autopilot/issues"
+Changelog = "https://github.com/gabrieljaime/abi-autopilot/blob/main/CHANGELOG.md"
+
+[project.scripts]
+abi-autopilot = "abi_autopilot.cli:main"
+
+[tool.setuptools]
+packages = ["abi_autopilot"]
+
+[tool.setuptools.package-data]
+abi_autopilot = ["prompts/*.md"]
+
+[tool.setuptools.dynamic]
+version = { attr = "abi_autopilot.__version__" }
